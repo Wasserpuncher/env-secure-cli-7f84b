@@ -22,6 +22,7 @@ A powerful and secure command-line utility for encrypting and decrypting environ
     *   [Generating a New Key](#generating-a-new-key)
     *   [Loading Key from Environment Variable (Recommended)](#loading-key-from-environment-variable-recommended)
     *   [Loading Key from File](#loading-key-from-file)
+*   [Configuration File](#configuration-file)
 *   [Usage](#usage)
     *   [Encrypting a Value](#encrypting-a-value)
     *   [Decrypting a Value](#decrypting-a-value)
@@ -119,6 +120,39 @@ python main.py encrypt -v "my_db_password" -s file -f env_key.txt
 python main.py decrypt -v "gAAAAAB..." -s file -f env_key.txt
 ```
 *   `--key-file` (`-f`): Specifies the path to the key file. Defaults to `env_key.txt`.
+
+## Configuration File
+
+Instead of passing `--key-source` and `--key-file` on every call, you can store these
+settings in a small JSON configuration file (parsed with the Python standard library only,
+no extra dependencies). By default the CLI looks for `.envsecure.json` in the current
+directory; you can point to another file with `--config/-c` or the `ENVSECURE_CONFIG`
+environment variable.
+
+Example `.envsecure.json`:
+
+```json
+{
+  "key_source": "file",
+  "key_file": "secrets/env_key.txt",
+  "output_path": "secrets/env_key.txt"
+}
+```
+
+Then simply run:
+
+```bash
+python main.py encrypt -v "my_db_password"           # uses .envsecure.json
+python main.py decrypt -v "gAAAAAB..." -c prod.json  # uses an explicit config file
+```
+
+**Precedence (highest wins):** CLI flag > configuration file > environment variable
+(`ENVSECURE_KEY_SOURCE`, `ENVSECURE_KEY_FILE`, `ENVSECURE_OUTPUT`) > built-in default.
+
+> **Security:** The configuration file only holds *paths* and *source selection*. Never put
+> a raw secret key into it — the CLI rejects a config that contains a `key`/`secret_key`
+> field. The actual key is still read from the environment variable `SECRET_KEY` or the
+> referenced key file.
 
 ## Usage
 

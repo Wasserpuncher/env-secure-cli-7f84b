@@ -1,11 +1,102 @@
 import os
-from typing import Optional, Tuple
+import json
+from typing import Any, Dict, Optional, Tuple
 import click
 from cryptography.fernet import Fernet, InvalidToken
+
+# Standardname der Konfigurationsdatei, die im aktuellen Verzeichnis gesucht wird.
+DEFAULT_CONFIG_FILENAME = ".envsecure.json"
+# Umgebungsvariable, die auf eine alternative Konfigurationsdatei zeigen kann.
+CONFIG_ENV_VAR = "ENVSECURE_CONFIG"
+# Erlaubte Schlüssel in der Konfigurationsdatei.
+KNOWN_CONFIG_KEYS = {"key_source", "key_file", "output_path"}
 
 class EnvSecureCLIError(Exception):
     """Basis-Ausnahme für EnvSecureCLI-Fehler."""
     pass
+
+def _discover_config_path(cli_config_path: Optional[str]) -> Tuple[str, bool]:
+    """Ermittelt den Pfad zur Konfigurationsdatei und ob er explizit gewünscht ist.
+
+    Vorrang der Fundstelle: ``--config``-Flag > Umgebungsvariable ``ENVSECURE_CONFIG``
+    > Standarddatei ``.envsecure.json`` im aktuellen Verzeichnis.
+
+    Args:
+        cli_config_path (Optional[str]): Der über ``--config`` übergebene Pfad.
+
+    Returns:
+        Tuple[str, bool]: Der aufzulösende Pfad und ein Flag, ob der Pfad explizit
+                          angefordert wurde (dann ist eine fehlende Datei ein Fehler).
+    """
+    if cli_config_path:
+        return cli_config_path, True
+    env_config = os.getenv(CONFIG_ENV_VAR)
+    if env_config:
+        return env_config, True
+    return DEFAULT_CONFIG_FILENAME, False
+
+def load_config(cli_config_path: Optional[str] = None) -> Dict[str, Any]:
+    """Lädt die JSON-Konfigurationsdatei (nur Standardbibliothek).
+
+    Eine explizit angeforderte Datei (via ``--config`` oder ``ENVSECURE_CONFIG``) muss
+    existieren; die implizite Standarddatei darf fehlen (dann wird ``{}`` geliefert).
+
+    Args:
+        cli_config_path (Optional[str]): Der über ``--config`` übergebene Pfad.
+
+    Returns:
+        Dict[str, Any]: Die geladenen Konfigurationswerte (leer, wenn keine Datei da ist).
+
+    Raises:
+        EnvSecureCLIError: Wenn die Datei fehlt (obwohl explizit angefordert),
+                           ungültiges JSON enthält oder kein JSON-Objekt ist.
+    """
+    path, explicit = _discover_config_path(cli_config_path)
+    if not os.path.exists(path):
+        if explicit:
+            raise EnvSecureCLIError(f"Configuration file '{path}' not found.")
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        raise EnvSecureCLIError(f"Could not read configuration file '{path}': {e}")
+    if not isinstance(data, dict):
+        raise EnvSecureCLIError(f"Configuration file '{path}' must contain a JSON object.")
+    # Sicherheitshinweis: Es dürfen nur Pfade/Quellen konfiguriert werden, niemals der
+    # geheime Schlüssel selbst. Ein versehentlich abgelegter Schlüssel wird abgelehnt.
+    if 'secret_key' in data or 'key' in data:
+        raise EnvSecureCLIError(
+            "Configuration file must not contain a raw secret key. "
+            "Use 'key_source'/'key_file' to reference the key instead."
+        )
+    return data
+
+def resolve_setting(cli_value: Optional[str], config: Dict[str, Any], key: str,
+                    env_var: Optional[str], default: Optional[str]) -> Optional[str]:
+    """Löst eine einzelne Einstellung nach der Vorrangregel auf.
+
+    Vorrang: CLI-Flag > Config-Datei > Umgebungsvariable > eingebauter Default.
+
+    Args:
+        cli_value (Optional[str]): Der auf der Kommandozeile übergebene Wert (oder None).
+        config (Dict[str, Any]): Die geladene Konfiguration.
+        key (str): Der Schlüssel in der Konfiguration.
+        env_var (Optional[str]): Name der Umgebungsvariable oder None.
+        default (Optional[str]): Der eingebaute Standardwert.
+
+    Returns:
+        Optional[str]: Der aufgelöste Wert.
+    """
+    if cli_value is not None:
+        return cli_value
+    if config.get(key) is not None:
+        return config[key]
+    if env_var:
+        env_value = os.getenv(env_var)
+        if env_value is not None:
+            return env_value
+    return default
 
 class CipherHandler:
     """Verantwortlich für die Handhabung der Verschlüsselungs-/Entschlüsselungslogik.
@@ -205,13 +296,20 @@ def cli():
 @click.option('--output-path', '-o', type=click.Path(), default=None,
               help='Optionaler Pfad zum Speichern des generierten Schlüssels. Standardmäßig wird er nicht gespeichert.')
 @click.option('--print-key', '-p', is_flag=True, help='Gibt den generierten Schlüssel auf der Konsole aus.')
-def generate_key(output_path: Optional[str], print_key: bool):
+@click.option('--config', '-c', 'config_path', type=click.Path(), default=None,
+              help='Pfad zu einer JSON-Konfigurationsdatei (Standard: .envsecure.json, falls vorhanden).')
+def generate_key(output_path: Optional[str], print_key: bool, config_path: Optional[str]):
     """Generiert einen neuen Fernet-Verschlüsselungsschlüssel.
 
     Der Schlüssel kann optional in einer Datei gespeichert oder auf der Konsole ausgegeben werden.
+    Der Standard-Ausgabepfad kann in der Konfigurationsdatei über 'output_path' gesetzt werden.
     SICHERHEITSHINWEIS: Speichern Sie diesen Schlüssel sicher! Er ist für die Verschlüsselung und Entschlüsselung unerlässlich.
     """
     try:
+        # Konfiguration laden und den Ausgabepfad nach der Vorrangregel auflösen.
+        config = load_config(config_path)
+        output_path = resolve_setting(output_path, config, 'output_path',
+                                      'ENVSECURE_OUTPUT', None)
         # Erstellt eine Instanz der EnvSecureCLI-Klasse, ohne sofort einen Schlüssel zu laden.
         cli_instance = EnvSecureCLI()
         cli_instance.generate_key_and_save(output_path, print_key)
@@ -220,19 +318,42 @@ def generate_key(output_path: Optional[str], print_key: bool):
         click.echo(f"Fehler beim Generieren des Schlüssels: {e}", err=True)
         exit(1)
 
+def _resolve_key_settings(key_source: Optional[str], key_file: Optional[str],
+                          config_path: Optional[str]) -> Tuple[str, str]:
+    """Lädt die Config und löst 'key_source'/'key_file' nach der Vorrangregel auf.
+
+    Vorrang je Einstellung: CLI-Flag > Config-Datei > Umgebungsvariable > Default.
+    Für 'key_source' wirkt ENVSECURE_KEY_SOURCE, für 'key_file' ENVSECURE_KEY_FILE.
+    """
+    config = load_config(config_path)
+    key_source = resolve_setting(key_source, config, 'key_source',
+                                 'ENVSECURE_KEY_SOURCE', 'env')
+    key_file = resolve_setting(key_file, config, 'key_file',
+                               'ENVSECURE_KEY_FILE', 'env_key.txt')
+    if key_source not in ('env', 'file'):
+        raise EnvSecureCLIError(
+            f"Invalid key_source '{key_source}'. Use 'env' or 'file'."
+        )
+    return key_source, key_file
+
 @cli.command()
 @click.option('--value', '-v', required=True, help='Der Wert, der verschlüsselt werden soll.')
-@click.option('--key-source', '-s', type=click.Choice(['env', 'file']), default='env',
-              help='Quelle des Schlüssels: "env" für Umgebungsvariable SECRET_KEY, "file" für env_key.txt.')
-@click.option('--key-file', '-f', type=click.Path(), default='env_key.txt',
+@click.option('--key-source', '-s', type=click.Choice(['env', 'file']), default=None,
+              help='Quelle des Schlüssels: "env" für Umgebungsvariable SECRET_KEY, "file" für Schlüsseldatei.')
+@click.option('--key-file', '-f', type=click.Path(), default=None,
               help='Pfad zur Schlüsseldatei, wenn --key-source auf "file" gesetzt ist.')
-def encrypt(value: str, key_source: str, key_file: str):
+@click.option('--config', '-c', 'config_path', type=click.Path(), default=None,
+              help='Pfad zu einer JSON-Konfigurationsdatei (Standard: .envsecure.json, falls vorhanden).')
+def encrypt(value: str, key_source: Optional[str], key_file: Optional[str], config_path: Optional[str]):
     """Verschlüsselt einen gegebenen Wert mit dem bereitgestellten Schlüssel.
 
-    Der Schlüssel wird entweder aus der Umgebungsvariable SECRET_KEY oder aus einer Schlüsseldatei geladen.
+    Schlüsselquelle und -datei können per Flag, über eine JSON-Konfigurationsdatei
+    oder über Umgebungsvariablen gesetzt werden (Vorrang: Flag > Config > Env > Default).
     """
     try:
-        # Initialisiert EnvSecureCLI und lädt den Schlüssel basierend auf den Optionen.
+        # Konfiguration laden und Einstellungen nach der Vorrangregel auflösen.
+        key_source, key_file = _resolve_key_settings(key_source, key_file, config_path)
+        # Initialisiert EnvSecureCLI und lädt den Schlüssel basierend auf den aufgelösten Optionen.
         cli_instance = EnvSecureCLI(key_source=key_source, key_file_path=key_file)
         encrypted_value = cli_instance.encrypt_value(value)
         click.echo(f"Verschlüsselter Wert: {encrypted_value}")
@@ -243,17 +364,22 @@ def encrypt(value: str, key_source: str, key_file: str):
 
 @cli.command()
 @click.option('--value', '-v', required=True, help='Der Wert, der entschlüsselt werden soll.')
-@click.option('--key-source', '-s', type=click.Choice(['env', 'file']), default='env',
-              help='Quelle des Schlüssels: "env" für Umgebungsvariable SECRET_KEY, "file" für env_key.txt.')
-@click.option('--key-file', '-f', type=click.Path(), default='env_key.txt',
+@click.option('--key-source', '-s', type=click.Choice(['env', 'file']), default=None,
+              help='Quelle des Schlüssels: "env" für Umgebungsvariable SECRET_KEY, "file" für Schlüsseldatei.')
+@click.option('--key-file', '-f', type=click.Path(), default=None,
               help='Pfad zur Schlüsseldatei, wenn --key-source auf "file" gesetzt ist.')
-def decrypt(value: str, key_source: str, key_file: str):
+@click.option('--config', '-c', 'config_path', type=click.Path(), default=None,
+              help='Pfad zu einer JSON-Konfigurationsdatei (Standard: .envsecure.json, falls vorhanden).')
+def decrypt(value: str, key_source: Optional[str], key_file: Optional[str], config_path: Optional[str]):
     """Entschlüsselt einen gegebenen Wert mit dem bereitgestellten Schlüssel.
 
-    Der Schlüssel wird entweder aus der Umgebungsvariable SECRET_KEY oder aus einer Schlüsseldatei geladen.
+    Schlüsselquelle und -datei können per Flag, über eine JSON-Konfigurationsdatei
+    oder über Umgebungsvariablen gesetzt werden (Vorrang: Flag > Config > Env > Default).
     """
     try:
-        # Initialisiert EnvSecureCLI und lädt den Schlüssel basierend auf den Optionen.
+        # Konfiguration laden und Einstellungen nach der Vorrangregel auflösen.
+        key_source, key_file = _resolve_key_settings(key_source, key_file, config_path)
+        # Initialisiert EnvSecureCLI und lädt den Schlüssel basierend auf den aufgelösten Optionen.
         cli_instance = EnvSecureCLI(key_source=key_source, key_file_path=key_file)
         decrypted_value = cli_instance.decrypt_value(value)
         click.echo(f"Entschlüsselter Wert: {decrypted_value}")

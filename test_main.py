@@ -1,8 +1,13 @@
 import unittest
 import os
+import json
 import tempfile
 from unittest.mock import patch, mock_open
-from main import EnvSecureCLI, CipherHandler, EnvSecureCLIError
+from click.testing import CliRunner
+from main import (
+    EnvSecureCLI, CipherHandler, EnvSecureCLIError,
+    cli, load_config, resolve_setting,
+)
 from cryptography.fernet import Fernet
 
 class TestCipherHandler(unittest.TestCase):
@@ -179,6 +184,165 @@ class TestEnvSecureCLI(unittest.TestCase):
         # Wenn kein Speicherpfad und kein --print-key angegeben ist, sollte der Schlüssel trotzdem auf stdout ausgegeben werden.
         mock_echo.assert_any_call(f"Neuer Schlüssel: {generated_key.decode('utf-8')}")
         mock_echo.assert_any_call("WARNUNG: Schlüssel wurde nicht in einer Datei gespeichert. Bitte notieren Sie ihn sicher!")
+
+
+class TestLoadConfig(unittest.TestCase):
+    """Testfälle für das Laden der JSON-Konfigurationsdatei."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def _write(self, name, content):
+        path = os.path.join(self.tmp, name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return path
+
+    def test_load_config_reads_json_object(self):
+        """Eine gültige JSON-Config wird als Dictionary geladen."""
+        path = self._write('cfg.json', json.dumps({"key_source": "file", "key_file": "k.key"}))
+        config = load_config(path)
+        self.assertEqual(config, {"key_source": "file", "key_file": "k.key"})
+
+    def test_load_config_missing_explicit_raises(self):
+        """Eine explizit angeforderte, fehlende Config ist ein Fehler."""
+        with self.assertRaises(EnvSecureCLIError) as cm:
+            load_config(os.path.join(self.tmp, "does_not_exist.json"))
+        self.assertIn("not found", str(cm.exception))
+
+    def test_load_config_invalid_json_raises(self):
+        """Ungültiges JSON löst einen Fehler aus."""
+        path = self._write('bad.json', "{not valid json}")
+        with self.assertRaises(EnvSecureCLIError) as cm:
+            load_config(path)
+        self.assertIn("Could not read configuration file", str(cm.exception))
+
+    def test_load_config_non_object_raises(self):
+        """Eine JSON-Datei, die kein Objekt ist, wird abgelehnt."""
+        path = self._write('list.json', json.dumps([1, 2, 3]))
+        with self.assertRaises(EnvSecureCLIError) as cm:
+            load_config(path)
+        self.assertIn("must contain a JSON object", str(cm.exception))
+
+    def test_load_config_rejects_raw_secret(self):
+        """Ein roher Schlüssel in der Config wird aus Sicherheitsgründen abgelehnt."""
+        path = self._write('secret.json', json.dumps({"secret_key": "leaked"}))
+        with self.assertRaises(EnvSecureCLIError) as cm:
+            load_config(path)
+        self.assertIn("must not contain a raw secret key", str(cm.exception))
+
+    def test_default_config_absent_returns_empty(self):
+        """Fehlt die implizite Standarddatei, wird eine leere Config geliefert."""
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.tmp)  # Verzeichnis ohne .envsecure.json
+            self.assertEqual(load_config(None), {})
+        finally:
+            os.chdir(cwd)
+
+
+class TestResolveSetting(unittest.TestCase):
+    """Testfälle für die Vorrangregel: CLI > Config > Env > Default."""
+
+    def setUp(self):
+        self._saved = os.environ.pop('ENVSECURE_TEST_VAR', None)
+
+    def tearDown(self):
+        if self._saved is not None:
+            os.environ['ENVSECURE_TEST_VAR'] = self._saved
+        else:
+            os.environ.pop('ENVSECURE_TEST_VAR', None)
+
+    def test_cli_flag_wins(self):
+        os.environ['ENVSECURE_TEST_VAR'] = 'env'
+        result = resolve_setting('cli', {'k': 'cfg'}, 'k', 'ENVSECURE_TEST_VAR', 'def')
+        self.assertEqual(result, 'cli')
+
+    def test_config_beats_env_and_default(self):
+        os.environ['ENVSECURE_TEST_VAR'] = 'env'
+        result = resolve_setting(None, {'k': 'cfg'}, 'k', 'ENVSECURE_TEST_VAR', 'def')
+        self.assertEqual(result, 'cfg')
+
+    def test_env_beats_default(self):
+        os.environ['ENVSECURE_TEST_VAR'] = 'env'
+        result = resolve_setting(None, {}, 'k', 'ENVSECURE_TEST_VAR', 'def')
+        self.assertEqual(result, 'env')
+
+    def test_default_when_nothing_set(self):
+        os.environ.pop('ENVSECURE_TEST_VAR', None)
+        result = resolve_setting(None, {}, 'k', 'ENVSECURE_TEST_VAR', 'def')
+        self.assertEqual(result, 'def')
+
+
+class TestConfigCLIIntegration(unittest.TestCase):
+    """End-to-End-Tests, die das Config-Laden über den CLI-Aufruf prüfen."""
+
+    def setUp(self):
+        self.runner = CliRunner()
+        self.tmp = tempfile.mkdtemp()
+        # Gültigen Fernet-Schlüssel in eine Schlüsseldatei schreiben.
+        self.key = Fernet.generate_key()
+        self.key_file = os.path.join(self.tmp, 'my.key')
+        with open(self.key_file, 'wb') as f:
+            f.write(self.key)
+        # Sicherstellen, dass keine störenden Umgebungsvariablen gesetzt sind.
+        for var in ('SECRET_KEY', 'ENVSECURE_KEY_SOURCE', 'ENVSECURE_KEY_FILE', 'ENVSECURE_CONFIG'):
+            os.environ.pop(var, None)
+
+    def _write_config(self, data):
+        path = os.path.join(self.tmp, 'cfg.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+        return path
+
+    def test_encrypt_uses_config_key_source_and_file(self):
+        """encrypt liest key_source und key_file aus der Config."""
+        cfg = self._write_config({"key_source": "file", "key_file": self.key_file})
+        result = self.runner.invoke(cli, ['encrypt', '-v', 'hello', '-c', cfg])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Verschlüsselter Wert:", result.output)
+
+    def test_config_roundtrip_encrypt_then_decrypt(self):
+        """Mit Config verschlüsselter Wert lässt sich mit Config wieder entschlüsseln."""
+        cfg = self._write_config({"key_source": "file", "key_file": self.key_file})
+        enc = self.runner.invoke(cli, ['encrypt', '-v', 'roundtrip', '-c', cfg])
+        self.assertEqual(enc.exit_code, 0, enc.output)
+        token = enc.output.split("Verschlüsselter Wert:", 1)[1].strip()
+        dec = self.runner.invoke(cli, ['decrypt', '-v', token, '-c', cfg])
+        self.assertEqual(dec.exit_code, 0, dec.output)
+        self.assertIn("Entschlüsselter Wert: roundtrip", dec.output)
+
+    def test_cli_flag_overrides_config(self):
+        """Ein CLI-Flag hat Vorrang vor der Config (Config zeigt auf falsche Datei)."""
+        wrong = os.path.join(self.tmp, 'wrong.key')
+        with open(wrong, 'wb') as f:
+            f.write(Fernet.generate_key())
+        cfg = self._write_config({"key_source": "file", "key_file": wrong})
+        # Config sagt 'wrong.key', CLI-Flag zeigt auf die korrekte Datei -> Flag gewinnt.
+        result = self.runner.invoke(
+            cli, ['encrypt', '-v', 'hi', '-c', cfg, '-f', self.key_file]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Verschlüsselter Wert:", result.output)
+
+    def test_config_env_var_locates_config(self):
+        """ENVSECURE_CONFIG kann die Config-Datei bereitstellen (ohne --config)."""
+        cfg = self._write_config({"key_source": "file", "key_file": self.key_file})
+        try:
+            os.environ['ENVSECURE_CONFIG'] = cfg
+            result = self.runner.invoke(cli, ['encrypt', '-v', 'viaenv'])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Verschlüsselter Wert:", result.output)
+        finally:
+            os.environ.pop('ENVSECURE_CONFIG', None)
+
+    def test_missing_explicit_config_errors(self):
+        """Ein explizit angeforderter, fehlender Config-Pfad führt zu Exit-Code 1."""
+        result = self.runner.invoke(
+            cli, ['encrypt', '-v', 'x', '-c', os.path.join(self.tmp, 'nope.json')]
+        )
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("not found", result.output)
 
 
 if __name__ == '__main__':

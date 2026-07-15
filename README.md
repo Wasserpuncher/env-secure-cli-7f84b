@@ -1,6 +1,6 @@
 # EnvSecure CLI
 
-[![Python application](https://github.com/your-org/env-secure-cli/actions/workflows/python-app.yml/badge.svg)](https://github.com/your-org/env-secure-cli/actions/workflows/python-app.yml)
+[![Python application](https://github.com/Wasserpuncher/env-secure-cli-7f84b/actions/workflows/python-app.yml/badge.svg)](https://github.com/Wasserpuncher/env-secure-cli-7f84b/actions/workflows/python-app.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A powerful and secure command-line utility for encrypting and decrypting environment variables. Designed for developers and operations teams, EnvSecure CLI helps you manage sensitive configuration data safely, preventing accidental exposure in source control or insecure environments.
@@ -33,7 +33,7 @@ A powerful and secure command-line utility for encrypting and decrypting environ
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-org/env-secure-cli.git
+    git clone https://github.com/Wasserpuncher/env-secure-cli-7f84b.git
     cd env-secure-cli
     ```
 

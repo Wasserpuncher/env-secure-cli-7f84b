@@ -72,7 +72,7 @@ class CipherHandler:
             raise EnvSecureCLIError(f"Ein unerwarteter Fehler ist während der Entschlüsselung aufgetreten: {e}")
 
 class EnvSecureCLI:
-    """Hauptklasse für die CLI-Operationen zur Umgebungsverschlüsselung."
+    """Hauptklasse für die CLI-Operationen zur Umgebungsverschlüsselung."""
 
     def __init__(self, key_source: Optional[str] = None, key_file_path: str = "env_key.txt"):
         """Initialisiert die CLI-Klasse und versucht, den Schlüssel zu laden.
@@ -167,7 +167,7 @@ class EnvSecureCLI:
 
         Raises:
             EnvSecureCLIError: Wenn der CipherHandler nicht initialisiert ist (kein Schlüssel geladen).
-        ""
+        """
         if not self.cipher_handler:
             # Fehler, wenn kein CipherHandler vorhanden ist, d.h. kein Schlüssel geladen wurde.
             raise EnvSecureCLIError("Kein Verschlüsselungsschlüssel geladen. Bitte laden Sie einen Schlüssel mit --key-source.")
@@ -186,7 +186,7 @@ class EnvSecureCLI:
 
         Raises:
             EnvSecureCLIError: Wenn der CipherHandler nicht initialisiert ist (kein Schlüssel geladen).
-        ""
+        """
         if not self.cipher_handler:
             # Fehler, wenn kein CipherHandler vorhanden ist.
             raise EnvSecureCLIError("Kein Entschlüsselungsschlüssel geladen. Bitte laden Sie einen Schlüssel mit --key-source.")
